@@ -1,0 +1,47 @@
+# ============================================================
+# voice-dictate — arquivo de configuração
+# Copie para ~/.config/voice-dictate.conf e edite.
+# (O install.sh gera este arquivo automaticamente se não existir.)
+#
+# Precedência dos valores:  defaults < este arquivo < variáveis de ambiente
+# (ou seja, um export WHISPER_MODEL=... no shell sobrepõe o config).
+#
+# Formato: CHAVE=VALOR  (linhas começando com # ou vazias são ignoradas)
+# ============================================================
+
+# --- Tecla de acionamento (usada pelo install.sh p/ registrar o binding GNOME) ---
+# Formato GNOME (X11). Ex: <Super><Shift>XF86TouchpadOff | XF86AudioMicMute | <Super>d
+KEY=<Super><Shift>XF86TouchpadOff>
+
+# --- Transcrição (faster-whisper) ---
+# Modelo: tiny | base | small | medium | large-v3 (maior = melhor, mais lento)
+WHISPER_MODEL=small
+# Idioma: vazio = auto-detect | pt | en | ...
+WHISPER_LANG=
+# Dispositivo: cuda | cpu | auto (tenta GPU, cai para CPU)
+WHISPER_DEVICE=auto
+# Caminho da libcublas.so.12 (preenchido automaticamente pelo install.sh).
+# Ex: /usr/local/lib/ollama/cuda_v12 | /usr/lib/wsl/lib | /usr/local/cuda/lib64
+WHISPER_CUDA_LIB=
+
+# --- Áudio ---
+# Fonte PulseAudio/PipeWire (default = microfone padrão do sistema)
+MIC_SOURCE=default
+
+# --- Tempos ---
+# Segundos até o anti-fantasma checar se o mic está captando
+ANTI_GHOST_DELAY=1.5
+# Nível RMS mínimo do WAV (aborta se menor — mic mudo/morto)
+ANTI_GHOST_THRESHOLD=0.003
+# Espera após parar o ffmpeg antes de transcrever (segundos)
+STOP_SETTLE=0.3
+# Teto do log de diagnóstico em KB (trunca para as últimas 100 linhas)
+LOG_MAX_KB=200
+# Delay do xdotool type em ms (usado só quando não há xclip)
+TYPE_DELAY=5
+
+# --- Feedback ---
+# 1 = beeps auditivos | 0 = silencioso
+BEEP=1
+# 1 = notificações GNOME | 0 = sem notificações
+NOTIFY=1

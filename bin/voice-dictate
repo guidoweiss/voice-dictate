@@ -6,21 +6,32 @@
 #   voice-dictate start    → força iniciar gravação
 #   voice-dictate stop     → força parar e transcrever
 #   voice-dictate status   → mostra estado atual
+#   voice-dictate config   → abre o arquivo de configuração no editor
+#   voice-dictate doctor   → mostra a configuração efetiva em uso
 #
 # 100% local: nenhum áudio sai da máquina.
 # Nada é persistente: o WAV temporário é apagado assim que o texto é injetado
 # (ou em qualquer erro). Não sobra áudio no disco.
 #
-# Config via env:
-#   WHISPER_MODEL   (default: small)    modelo faster-whisper
-#   WHISPER_LANG    (default: auto)     ex: pt, en — vazio = auto-detect
-#   MIC_SOURCE      (default: default)  fonte PulseAudio/PipeWire
-#   WHISPER_DEVICE  (default: auto)     cuda | cpu | auto
-#   WHISPER_CUDA_LIB (opcional)         caminho da libcublas (ex: /usr/local/lib/ollama/cuda_v12)
+# Configuração (precedência: defaults < ~/.config/voice-dictate.conf < env):
+#   KEY              tecla de acionamento (usada pelo install.sh)
+#   WHISPER_MODEL    modelo faster-whisper (tiny|base|small|medium|large-v3)
+#   WHISPER_LANG     idioma (vazio = auto-detect; ex: pt, en)
+#   WHISPER_DEVICE   cuda | cpu | auto (tenta GPU, cai para CPU)
+#   WHISPER_CUDA_LIB caminho da libcublas.so.12 (opcional)
+#   MIC_SOURCE       fonte PulseAudio/PipeWire
+#   ANTI_GHOST_DELAY segundos até checar o nível do microfone
+#   ANTI_GHOST_THRESHOLD  nível RMS mínimo do WAV (aborta se menor)
+#   STOP_SETTLE      espera após parar o ffmpeg (segundos)
+#   LOG_MAX_KB       teto do log de diagnóstico em KB
+#   TYPE_DELAY       delay do xdotool type em ms (fallback sem xclip)
+#   BEEP             1 = beeps | 0 = silencioso
+#   NOTIFY           1 = notificações | 0 = sem notificações
 
 set -u
 
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/voice-dictate.conf"
 STATE_FILE="${TMPDIR:-/tmp}/voice-dictate.pid"
 WAV_FILE="${TMPDIR:-/tmp}/voice-dictate.wav"
 LOG_FILE="${TMPDIR:-/tmp}/voice-dictate.log"
@@ -34,16 +45,45 @@ else
   PYTHON_BIN="${WHISPER_PYTHON:-python3}"
 fi
 
+# --- Carrega ~/.config/voice-dictate.conf (não sobrescreve env já definido) ---
+load_config() {
+  [ -f "$CONFIG_FILE" ] || return 0
+  local key val
+  while IFS='=' read -r key val; do
+    case "$key" in
+      \#*|"") continue ;;
+      [A-Za-z_]*)
+        val="${val%%\#*}"
+        val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        # Só preenche se a variável NÃO veio do ambiente (env tem prioridade)
+        if [ -z "${!key+x}" ]; then
+          export "$key=$val"
+        fi
+        ;;
+    esac
+  done < "$CONFIG_FILE"
+}
+load_config
+
+# --- Defaults (aplicados apenas ao que não veio do config nem do env) ---
 WHISPER_MODEL="${WHISPER_MODEL:-small}"
 WHISPER_LANG="${WHISPER_LANG:-}"
 MIC_SOURCE="${MIC_SOURCE:-default}"
 WHISPER_DEVICE="${WHISPER_DEVICE:-auto}"
 WHISPER_CUDA_LIB="${WHISPER_CUDA_LIB:-}"
+ANTI_GHOST_DELAY="${ANTI_GHOST_DELAY:-1.5}"
+ANTI_GHOST_THRESHOLD="${ANTI_GHOST_THRESHOLD:-0.003}"
+STOP_SETTLE="${STOP_SETTLE:-0.3}"
+LOG_MAX_KB="${LOG_MAX_KB:-200}"
+TYPE_DELAY="${TYPE_DELAY:-5}"
+BEEP="${BEEP:-1}"
+NOTIFY="${NOTIFY:-1}"
 
-# --- Log com teto de ~200KB (não cresce para sempre) ---
+# --- Log com teto (não cresce para sempre) ---
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
-  if [ "$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt 200000 ]; then
+  local max_bytes=$((LOG_MAX_KB * 1000))
+  if [ "$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$max_bytes" ]; then
     tail -100 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE"
   fi
 }
@@ -51,6 +91,7 @@ log() {
 # --- Feedback auditivo: tom via ffplay (sem arquivos extras) ---
 # beep <freq> <duracao> [vezes]
 beep() {
+  [ "$BEEP" = "1" ] || return 0
   local freq="${1:-880}" dur="${2:-0.15}" count="${3:-1}" i
   for (( i=0; i<count; i++ )); do
     ffplay -v error -nodisp -autoexit -f lavfi -i "sine=frequency=${freq}:duration=${dur}" >/dev/null 2>&1 || true
@@ -60,6 +101,7 @@ beep() {
 
 # --- Notificação com duração: segundo arg em ms; 0 = persistente ---
 notify() {
+  [ "$NOTIFY" = "1" ] || return 0
   if command -v notify-send >/dev/null 2>&1; then
     notify-send -t "${2:-1500}" "Voice Dictate" "$1" 2>/dev/null || true
   fi
@@ -68,7 +110,7 @@ notify() {
 # --- Dependências essenciais (xclip/ffplay/notify são opcionais com fallback) ---
 check_deps() {
   local missing=0
-  for cmd in ffmpeg python3 xdotool; do
+  for cmd in ffmpeg "$PYTHON_BIN" xdotool; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       echo "Faltando dependência: $cmd" >&2
       missing=1
@@ -106,14 +148,14 @@ start_recording() {
   ffmpeg -y -v error -f pulse -i "$MIC_SOURCE" -ac 1 -ar 16000 -f wav pipe:1 > "$WAV_FILE" 2>>"$LOG_FILE" &
   echo $! > "$STATE_FILE"
 
-  # Anti-fantasma: após 1.5s, verifica se o microfone está captando.
+  # Anti-fantasma: após ANTI_GHOST_DELAY segundos, verifica se o mic capta.
   # Se silêncio total (mic mudo/errado), aborta antes de você falar à toa.
-  sleep 1.5
+  sleep "$ANTI_GHOST_DELAY"
   if [ -f "$STATE_FILE" ]; then
     local LEVEL
     LEVEL=$("$PYTHON_BIN" "$BASE_DIR/check-audio-level.py" "$WAV_FILE" 2>/dev/null | head -1 || true)
     LEVEL="${LEVEL:-0.0000}"
-    if awk "BEGIN{exit !($LEVEL < 0.003)}"; then
+    if awk "BEGIN{exit !($LEVEL < $ANTI_GHOST_THRESHOLD)}"; then
       log "anti-fantasma: silencio total (level=${LEVEL}) — abortando"
       kill "$(cat "$STATE_FILE" 2>/dev/null)" 2>/dev/null
       rm -f "$STATE_FILE" "$WAV_FILE"
@@ -132,7 +174,7 @@ stop_and_transcribe() {
   if [ -n "$PID" ]; then
     kill "$PID" 2>/dev/null
   fi
-  sleep 0.3
+  sleep "$STOP_SETTLE"
   log "gravacao parada"
 
   if [ ! -s "$WAV_FILE" ]; then
@@ -178,7 +220,7 @@ stop_and_transcribe() {
     printf '%s' "$TEXT" | xclip -selection clipboard
     xdotool key --clearmodifiers ctrl+shift+v
   else
-    xdotool type --clearmodifiers --delay 5 "$TEXT"
+    xdotool type --clearmodifiers --delay "$TYPE_DELAY" "$TEXT"
   fi
 
   # LIMPEZA: o áudio é temporário, não fica salvo
@@ -186,6 +228,51 @@ stop_and_transcribe() {
   beep 1200 0.3 1
   notify "✅ Texto injetado" 2000
   log "texto injetado (${#TEXT} caracteres)"
+}
+
+cmd_config() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Config não existe ainda: $CONFIG_FILE"
+    echo "Rode o install.sh para gerar (ou copie o config.example do repo)."
+    exit 1
+  fi
+  local editor="${EDITOR:-}"
+  if [ -z "$editor" ]; then
+    for e in nano vim vi; do
+      if command -v "$e" >/dev/null 2>&1; then editor="$e"; break; fi
+    done
+  fi
+  if [ -z "$editor" ]; then
+    echo "Nenhum editor encontrado. Edite manualmente: $CONFIG_FILE"
+    exit 1
+  fi
+  "$editor" "$CONFIG_FILE"
+}
+
+cmd_doctor() {
+  echo "=== voice-dictate doctor ==="
+  echo "config file:    $CONFIG_FILE $([ -f "$CONFIG_FILE" ] && echo '(presente)' || echo '(ausente)')"
+  echo "python:         $PYTHON_BIN"
+  echo "model:          $WHISPER_MODEL"
+  echo "lang:           ${WHISPER_LANG:-auto}"
+  echo "device:         $WHISPER_DEVICE"
+  echo "cuda_lib:       ${WHISPER_CUDA_LIB:-(não configurado — CPU ou auto-fallback)}"
+  echo "mic_source:     $MIC_SOURCE"
+  echo "anti_ghost:     delay=${ANTI_GHOST_DELAY}s threshold=${ANTI_GHOST_THRESHOLD}"
+  echo "stop_settle:    ${STOP_SETTLE}s"
+  echo "log_max:        ${LOG_MAX_KB}KB"
+  echo "type_delay:     ${TYPE_DELAY}ms"
+  echo "feedback:       beep=$BEEP notify=$NOTIFY"
+  echo "estado:         $(cmd_status_inner)"
+  echo "dependências:   ffmpeg=$(command -v ffmpeg >/dev/null 2>&1 && echo ok || echo FALTA) xdotool=$(command -v xdotool >/dev/null 2>&1 && echo ok || echo FALTA) xclip=$(command -v xclip >/dev/null 2>&1 && echo ok || echo opcional) notify=$(command -v notify-send >/dev/null 2>&1 && echo ok || echo opcional)"
+}
+
+cmd_status_inner() {
+  if [ -f "$STATE_FILE" ] && kill -0 "$(cat "$STATE_FILE" 2>/dev/null)" 2>/dev/null; then
+    echo "gravando (pid $(cat "$STATE_FILE"))"
+  else
+    echo "ocioso"
+  fi
 }
 
 case "${1:-}" in
@@ -204,11 +291,13 @@ case "${1:-}" in
     stop_and_transcribe
     ;;
   status)
-    if [ -f "$STATE_FILE" ] && kill -0 "$(cat "$STATE_FILE" 2>/dev/null)" 2>/dev/null; then
-      echo "gravando (pid $(cat "$STATE_FILE"))"
-    else
-      echo "ocioso"
-    fi
+    cmd_status_inner
+    ;;
+  config)
+    cmd_config
+    ;;
+  doctor)
+    cmd_doctor
     ;;
   "")
     check_deps
@@ -220,7 +309,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "Uso: voice-dictate [start|stop|status]" >&2
+    echo "Uso: voice-dictate [start|stop|status|config|doctor]" >&2
     exit 1
     ;;
 esac

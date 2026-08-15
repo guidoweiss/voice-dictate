@@ -55,29 +55,47 @@ cd voice-dictate
 O instalador:
 1. Copia os binários para `~/.local/bin/`
 2. Cria um venv isolado com `faster-whisper` em `~/.local/share/voice-dictate/venv`
-3. Registra a tecla padrão no GNOME (custom-keybinding "Voice Dictate")
+3. **Gera o arquivo de configuração** `~/.config/voice-dictate.conf` (se não existir) e **detecta CUDA automaticamente**
+4. Registra a tecla padrão no GNOME (custom-keybinding "Voice Dictate")
 
-### Tecla padrão e personalização
+---
 
-O padrão é `<Super><Shift>XF86TouchpadOff` (a tecla ASUS única do TUF F16 emite esse chord). Para usar outra tecla:
+## ⚙️ Configuração
 
+Tudo fica em **um arquivo**: `~/.config/voice-dictate.conf` (gerado no install, editável à vontade).
+
+```bash
+voice-dictate config    # abre o arquivo no seu editor
+voice-dictate doctor    # mostra a configuração efetiva em uso + diagnóstico
+```
+
+**Precedência:** `defaults < arquivo de config < variáveis de ambiente`
+(um `export WHISPER_MODEL=...` no shell sobrepõe o config — útil para testes pontuais).
+
+| Opção | Default | Descrição |
+|---|---|---|
+| `KEY` | `<Super><Shift>XF86TouchpadOff` | tecla de acionamento (usada pelo install.sh) |
+| `WHISPER_MODEL` | `small` | `tiny`, `base`, `small`, `medium`, `large-v3` |
+| `WHISPER_LANG` | vazio (auto) | `pt`, `en`, etc. |
+| `WHISPER_DEVICE` | `auto` | `cuda`, `cpu` ou `auto` (tenta GPU, cai para CPU) |
+| `WHISPER_CUDA_LIB` | detectado | caminho da `libcublas.so.12` |
+| `MIC_SOURCE` | `default` | fonte PulseAudio/PipeWire |
+| `ANTI_GHOST_DELAY` | `1.5` | segundos até checar se o mic capta |
+| `ANTI_GHOST_THRESHOLD` | `0.003` | nível RMS mínimo (aborta se menor) |
+| `STOP_SETTLE` | `0.3` | espera após parar o ffmpeg |
+| `LOG_MAX_KB` | `200` | teto do log de diagnóstico |
+| `TYPE_DELAY` | `5` | delay do `xdotool type` (fallback sem xclip) |
+| `BEEP` | `1` | `0` desliga os beeps |
+| `NOTIFY` | `1` | `0` desliga as notificações |
+
+**Mudou a tecla no config?** Rode `./install.sh` de novo — ele relê o `KEY` do arquivo e re-registra o binding.
+
+Para usar outra tecla na primeira instalação:
 ```bash
 KEY="XF86AudioMicMute" ./install.sh
 # ou sem registrar tecla nenhuma:
 NO_KEYBINDING=1 ./install.sh
 ```
-
-**Variáveis de ambiente** (também úteis no seu shell):
-
-| Variável | Default | Descrição |
-|---|---|---|
-| `WHISPER_MODEL` | `small` | `tiny`, `base`, `small`, `medium`, `large-v3` |
-| `WHISPER_LANG` | auto | `pt`, `en`, etc. |
-| `WHISPER_DEVICE` | `auto` | `cuda`, `cpu` ou `auto` (tenta GPU, cai para CPU) |
-| `WHISPER_CUDA_LIB` | — | caminho da `libcublas.so.12` (ex: `/usr/local/lib/ollama/cuda_v12`) |
-| `MIC_SOURCE` | `default` | fonte PulseAudio/PipeWire |
-
-Exemplo: `WHISPER_MODEL=tiny WHISPER_DEVICE=cpu voice-dictate stop`
 
 ---
 
@@ -89,6 +107,8 @@ Exemplo: `WHISPER_MODEL=tiny WHISPER_DEVICE=cpu voice-dictate stop`
 | `voice-dictate start` | começa a gravar |
 | `voice-dictate stop` | para e transcreve |
 | `voice-dictate status` | mostra se está gravando |
+| `voice-dictate config` | abre o arquivo de configuração |
+| `voice-dictate doctor` | mostra a config efetiva + diagnóstico |
 
 **Fluxo de uso:**
 1. Foque o app onde quer o texto (ex: OpenCode)

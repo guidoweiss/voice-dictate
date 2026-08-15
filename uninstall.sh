@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# uninstall.sh — remove o voice-dictate do sistema.
-# Remove: binários, venv, custom-keybinding GNOME.
+# uninstall.sh — remove o voice-dictate do sistema por completo.
+# Remove: binários, venv, custom-keybinding GNOME, config e estado temporário.
 set -euo pipefail
 
 BIN_DIR="$HOME/.local/bin"
 VENV_DIR="$HOME/.local/share/voice-dictate"
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/voice-dictate.conf"
 
 echo "==> Removendo binários"
 rm -f "$BIN_DIR/voice-dictate" "$BIN_DIR/voice-transcribe.py" "$BIN_DIR/check-audio-level.py"
@@ -23,5 +24,14 @@ if command -v gsettings >/dev/null 2>&1; then
   fi
 fi
 
+echo "==> Removendo config"
+rm -f "$CONFIG_FILE"
+
+echo "==> Removendo estado temporário (wav/pid/log)"
+rm -f "${TMPDIR:-/tmp}/voice-dictate.pid" "${TMPDIR:-/tmp}/voice-dictate.wav" "${TMPDIR:-/tmp}/voice-dictate.log"
+
+# Mata qualquer ffmpeg órfão que ainda esteja gravando
+pkill -f "voice-dictate.wav" 2>/dev/null || true
+
 echo ""
-echo "✅ voice-dictate removido."
+echo "✅ voice-dictate removido completamente."
