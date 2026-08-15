@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# voice-dictate — dictation por voz: grava → transcreve local → injeta como teclado.
+#
+# Uso:
+#   voice-dictate          → alterna gravação/transcrição
+#   voice-dictate start    → força iniciar gravação
+#   voice-dictate stop     → força parar e transcrever
+#   voice-dictate status   → mostra estado atual
+#
+# 100% local: nenhum áudio sai da máquina.
+# Nada é persistente: o WAV temporário é apagado assim que o texto é injetado
+# (ou em qualquer erro). Não sobra áudio no disco.
+#
+# Config via env:
+#   WHISPER_MODEL   (default: small)    modelo faster-whisper
+#   WHISPER_LANG    (default: auto)     ex: pt, en — vazio = auto-detect
+#   MIC_SOURCE      (default: default)  fonte PulseAudio/PipeWire
+#   WHISPER_DEVICE  (default: auto)     cuda | cpu | auto
+#   WHISPER_CUDA_LIB (opcional)         caminho da libcublas (ex: /usr/local/lib/ollama/cuda_v12)
+
+set -u
+
+BASE_DIR="$(dirname "$(readlink -f "$0")")"
+STATE_FILE="${TMPDIR:-/tmp}/voice-dictate.pid"
+WAV_FILE="${TMPDIR:-/tmp}/voice-dictate.wav"
+LOG_FILE="${TMPDIR:-/tmp}/voice-dictate.log"
+mkdir -p "$(dirname "$STATE_FILE")"
+
+# Python: usa o venv do install.sh se existir, senão o python3 do sistema
+VENV_PY="$HOME/.local/share/voice-dictate/venv/bin/python"
+if [ -x "$VENV_PY" ]; then
+  PYTHON_BIN="$VENV_PY"
+else
+  PYTHON_BIN="${WHISPER_PYTHON:-python3}"
+fi
+
+WHISPER_MODEL="${WHISPER_MODEL:-small}"
+WHISPER_LANG="${WHISPER_LANG:-}"
+MIC_SOURCE="${MIC_SOURCE:-default}"
+WHISPER_DEVICE="${WHISPER_DEVICE:-auto}"
+WHISPER_CUDA_LIB="${WHISPER_CUDA_LIB:-}"
+
+# --- Log com teto de ~200KB (não cresce para sempre) ---
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
+  if [ "$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt 200000 ]; then
+    tail -100 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE"
+  fi
+}
+
+# --- Feedback auditivo: tom via ffplay (sem arquivos extras) ---
+# beep <freq> <duracao> [vezes]
+beep() {
+  local freq="${1:-880}" dur="${2:-0.15}" count="${3:-1}" i
+  for (( i=0; i<count; i++ )); do
+    ffplay -v error -nodisp -autoexit -f lavfi -i "sine=frequency=${freq}:duration=${dur}" >/dev/null 2>&1 || true
+    [ "$i" -lt $((count-1)) ] && sleep 0.05
+  done
+}
+
+# --- Notificação com duração: segundo arg em ms; 0 = persistente ---
+notify() {
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -t "${2:-1500}" "Voice Dictate" "$1" 2>/dev/null || true
+  fi
+}
+
+# --- Dependências essenciais (xclip/ffplay/notify são opcionais com fallback) ---
+check_deps() {
+  local missing=0
+  for cmd in ffmpeg python3 xdotool; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "Faltando dependência: $cmd" >&2
+      missing=1
+    fi
+  done
+  if [ "$missing" -eq 1 ]; then
+    echo "Instale as dependências e tente de novo (veja README)." >&2
+    exit 1
+  fi
+}
+
+# --- Remove WAV temporário (limpeza em qualquer saída) ---
+cleanup() {
+  rm -f "$WAV_FILE"
+}
+
+start_recording() {
+  # Se o state aponta para um processo morto (ffmpeg caiu), limpa o órfão
+  if [ -f "$STATE_FILE" ]; then
+    local OLD_PID
+    OLD_PID=$(cat "$STATE_FILE" 2>/dev/null || true)
+    if [ -z "$OLD_PID" ] || ! kill -0 "$OLD_PID" 2>/dev/null; then
+      rm -f "$STATE_FILE"
+    fi
+  fi
+
+  rm -f "$WAV_FILE"
+  log "gravacao iniciada (mic=$MIC_SOURCE)"
+  beep 880 0.15 2
+  notify "🎙 Gravando... (aperte de novo p/ parar)" 0
+
+  # pipe:1 > arquivo força o ffmpeg a escrever CONTINUAMENTE (sem bufferizar
+  # tudo em memória) — necessário para o anti-fantasma medir o nível ao vivo.
+  # Header RIFF size=ffffffff (streaming) é aceito pelo faster-whisper.
+  ffmpeg -y -v error -f pulse -i "$MIC_SOURCE" -ac 1 -ar 16000 -f wav pipe:1 > "$WAV_FILE" 2>>"$LOG_FILE" &
+  echo $! > "$STATE_FILE"
+
+  # Anti-fantasma: após 1.5s, verifica se o microfone está captando.
+  # Se silêncio total (mic mudo/errado), aborta antes de você falar à toa.
+  sleep 1.5
+  if [ -f "$STATE_FILE" ]; then
+    local LEVEL
+    LEVEL=$("$PYTHON_BIN" "$BASE_DIR/check-audio-level.py" "$WAV_FILE" 2>/dev/null | head -1 || true)
+    LEVEL="${LEVEL:-0.0000}"
+    if awk "BEGIN{exit !($LEVEL < 0.003)}"; then
+      log "anti-fantasma: silencio total (level=${LEVEL}) — abortando"
+      kill "$(cat "$STATE_FILE" 2>/dev/null)" 2>/dev/null
+      rm -f "$STATE_FILE" "$WAV_FILE"
+      beep 220 0.3 3
+      notify "❌ Microfone não está captando áudio!" 4000
+      exit 1
+    fi
+    log "anti-fantasma: captacao OK (level=${LEVEL})"
+  fi
+}
+
+stop_and_transcribe() {
+  local PID
+  PID=$(cat "$STATE_FILE" 2>/dev/null || true)
+  rm -f "$STATE_FILE"
+  if [ -n "$PID" ]; then
+    kill "$PID" 2>/dev/null
+  fi
+  sleep 0.3
+  log "gravacao parada"
+
+  if [ ! -s "$WAV_FILE" ]; then
+    log "erro: arquivo de audio vazio"
+    cleanup
+    beep 220 0.3 3
+    notify "Erro: sem áudio gravado" 4000
+    exit 1
+  fi
+
+  beep 660 0.2 1
+  notify "⏳ Transcrevendo..." 0
+  log "transcrevendo (model=$WHISPER_MODEL)"
+
+  local TEXT
+  TEXT=$(WHISPER_MODEL="$WHISPER_MODEL" WHISPER_LANG="$WHISPER_LANG" \
+    WHISPER_DEVICE="$WHISPER_DEVICE" WHISPER_CUDA_LIB="$WHISPER_CUDA_LIB" \
+    "$PYTHON_BIN" "$BASE_DIR/voice-transcribe.py" "$WAV_FILE" 2>>"$LOG_FILE")
+  local RC=$?
+
+  if [ $RC -ne 0 ]; then
+    log "erro na transcricao (rc=$RC)"
+    cleanup
+    beep 220 0.3 3
+    notify "Erro na transcrição" 4000
+    exit 1
+  fi
+
+  TEXT=$(echo "$TEXT" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+  if [ -z "$TEXT" ]; then
+    log "transcricao vazia"
+    cleanup
+    beep 220 0.3 3
+    notify "Nada reconhecido — tente de novo" 4000
+    exit 1
+  fi
+
+  log "transcrito: ${TEXT:0:100}"
+
+  # Injeção: clipboard + Ctrl+Shift+V (funciona em apps e terminais)
+  if command -v xclip >/dev/null 2>&1; then
+    printf '%s' "$TEXT" | xclip -selection clipboard
+    xdotool key --clearmodifiers ctrl+shift+v
+  else
+    xdotool type --clearmodifiers --delay 5 "$TEXT"
+  fi
+
+  # LIMPEZA: o áudio é temporário, não fica salvo
+  cleanup
+  beep 1200 0.3 1
+  notify "✅ Texto injetado" 2000
+  log "texto injetado (${#TEXT} caracteres)"
+}
+
+case "${1:-}" in
+  start)
+    check_deps
+    if [ -f "$STATE_FILE" ] && kill -0 "$(cat "$STATE_FILE" 2>/dev/null)" 2>/dev/null; then
+      echo "Já gravando."; exit 0
+    fi
+    rm -f "$STATE_FILE"
+    start_recording
+    ;;
+  stop)
+    if [ ! -f "$STATE_FILE" ]; then
+      echo "Não está gravando."; exit 0
+    fi
+    stop_and_transcribe
+    ;;
+  status)
+    if [ -f "$STATE_FILE" ] && kill -0 "$(cat "$STATE_FILE" 2>/dev/null)" 2>/dev/null; then
+      echo "gravando (pid $(cat "$STATE_FILE"))"
+    else
+      echo "ocioso"
+    fi
+    ;;
+  "")
+    check_deps
+    if [ -f "$STATE_FILE" ] && kill -0 "$(cat "$STATE_FILE" 2>/dev/null)" 2>/dev/null; then
+      stop_and_transcribe
+    else
+      rm -f "$STATE_FILE"
+      start_recording
+    fi
+    ;;
+  *)
+    echo "Uso: voice-dictate [start|stop|status]" >&2
+    exit 1
+    ;;
+esac

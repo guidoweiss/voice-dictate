@@ -1,0 +1,16 @@
+# Arquivos temporários
+*.wav
+*.raw
+*.tmp
+voice-dictate.log
+voice-dictate.pid
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Ambiente local
+.env
+.local/
