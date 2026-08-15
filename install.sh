@@ -122,7 +122,14 @@ if [ "$NO_KEYBINDING" = "0" ]; then
   # Adiciona à lista de custom-keybindings se ainda não estiver
   CURRENT=$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings 2>/dev/null || echo "@as []")
   if ! echo "$CURRENT" | grep -q "voice-dictate"; then
-    NEW=$(echo "$CURRENT" | sed "s|@as \[\],|@as ['${BINDINGS_PATH}'],|" | sed "s|@as \[\]|@as ['${BINDINGS_PATH}']|")
+    if [ "$CURRENT" = "@as []" ]; then
+      NEW="@as ['${BINDINGS_PATH}']"
+    else
+      # Remove os colchetes externos e faz append do novo caminho
+      INNER="${CURRENT#[}"
+      INNER="${INNER%]}"
+      NEW="[${INNER}, '${BINDINGS_PATH}']"
+    fi
     gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "$NEW"
   fi
   gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:"$BINDINGS_PATH" name "Voice Dictate"
