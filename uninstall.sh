@@ -19,7 +19,12 @@ if command -v gsettings >/dev/null 2>&1; then
   gsettings reset-recursively "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:${BINDINGS_PATH}" 2>/dev/null || true
   CURRENT=$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings 2>/dev/null || true)
   if echo "$CURRENT" | grep -q "voice-dictate"; then
+    # Remove o entry e normaliza a lista (sem vírgulas órfãs)
     NEW=$(echo "$CURRENT" | sed "s| *'${BINDINGS_PATH}',\?||g")
+    NEW=$(echo "$NEW" | sed 's/, *]/]/g; s/\[ *, */[ /g; s/, *,/,/g')
+    case "$NEW" in
+      "@as []"|"[]"|"[ ]"|"") NEW="@as []" ;;
+    esac
     gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "$NEW" 2>/dev/null || true
   fi
 fi
