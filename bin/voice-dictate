@@ -232,9 +232,31 @@ stop_and_transcribe() {
 
 cmd_config() {
   if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Config não existe ainda: $CONFIG_FILE"
-    echo "Rode o install.sh para gerar (ou copie o config.example do repo)."
-    exit 1
+    # Tenta gerar a partir do config.example do repo (bin/../config.example)
+    local EXAMPLE="$(dirname "$BASE_DIR")/config.example"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    if [ -f "$EXAMPLE" ]; then
+      cp "$EXAMPLE" "$CONFIG_FILE"
+      echo "Config gerado a partir do config.example: $CONFIG_FILE"
+    else
+      cat > "$CONFIG_FILE" <<'EOF'
+# voice-dictate — configuracao (gerado pelo voice-dictate config)
+KEY=<Super><Shift>XF86TouchpadOff
+WHISPER_MODEL=small
+WHISPER_LANG=
+WHISPER_DEVICE=auto
+WHISPER_CUDA_LIB=
+MIC_SOURCE=default
+ANTI_GHOST_DELAY=1.5
+ANTI_GHOST_THRESHOLD=0.003
+STOP_SETTLE=0.3
+LOG_MAX_KB=200
+TYPE_DELAY=5
+BEEP=1
+NOTIFY=1
+EOF
+      echo "Config gerado: $CONFIG_FILE"
+    fi
   fi
   local editor="${EDITOR:-}"
   if [ -z "$editor" ]; then

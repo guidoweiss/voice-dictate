@@ -35,8 +35,10 @@ rm -f "$CONFIG_FILE"
 echo "==> Removendo estado temporário (wav/pid/log)"
 rm -f "${TMPDIR:-/tmp}/voice-dictate.pid" "${TMPDIR:-/tmp}/voice-dictate.wav" "${TMPDIR:-/tmp}/voice-dictate.log"
 
-# Mata qualquer ffmpeg órfão que ainda esteja gravando
-pkill -f "voice-dictate.wav" 2>/dev/null || true
+# Mata qualquer ffmpeg órfão que ainda esteja gravando.
+# Padrão com [.] para NÃO casar com a própria linha de comando do pkill
+# (pkill -f casa com o processo que o invoca se o padrão aparecer nela).
+pkill -f 'voice-dictate[.]wav' 2>/dev/null || true
 
 echo ""
 echo "✅ voice-dictate removido completamente."

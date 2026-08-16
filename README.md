@@ -128,14 +128,44 @@ NO_KEYBINDING=1 ./install.sh
 
 ## 🛠️ Solução de problemas
 
+**Primeiro diagnóstico:** `voice-dictate doctor` mostra a config efetiva, o python usado, o CUDA e se as dependências existem.
+
 | Problema | Solução |
 |---|---|
-| A tecla não faz nada | `systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target` |
-| "Microfone não está captando áudio!" | Verifique o mic no PulseAudio/PipeWire |
-| Transcrição lenta | Use `WHISPER_MODEL=tiny` ou `WHISPER_DEVICE=cpu` |
-| Erro de CUDA | Configure `WHISPER_CUDA_LIB` ou use `WHISPER_DEVICE=cpu` |
-| ffmpeg órfão rodando | `pkill -f voice-dictate.wav` |
-| Log/diagnóstico | `tail -50 /tmp/voice-dictate.log` |
+| A tecla não faz nada | 1) `systemctl --user restart org.gnome.SettingsDaemon.MediaKeys.target` (reinicia o serviço de atalhos) 2) Confira que o binding está na lista: `gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings` |
+| Binding registrado mas a tecla não dispara | Se o journal mostrar `Failed to grab accelerator ... voice-dictate`, o serviço não conseguiu capturar a tecla. Troque a tecla no config (ex: `<Super><Alt>d`), rode `./install.sh` de novo e reinicie o MediaKeys |
+| "Microfone não está captando áudio!" | Verifique o volume do mic: `pactl get-source-volume @DEFAULT_SOURCE@` — se estiver baixo, aumente: `pactl set-source-volume @DEFAULT_SOURCE@ 80%` |
+| Transcrição sai vazia / não reconhece | Microfone com volume baixo (veja acima) ou ambiente ruidoso. Aumente o mic e fale mais próximo |
+| Transcrição lenta | Use `WHISPER_MODEL=tiny` ou `WHISPER_DEVICE=cpu` no config |
+| Erro de CUDA | Configure `WHISPER_CUDA_LIB` no config (o install.sh detecta) ou use `WHISPER_DEVICE=cpu` |
+| ffmpeg órfão rodando | `pkill -f 'voice-dictate[.]wav'` (o `[.]` evita o pkill se auto-matar) |
+| Log/diagnóstico | `tail -50 /tmp/voice-dictate.log` (teto 200KB, não cresce para sempre) |
+| Os atalhos todos pararam | `systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target` |
+
+---
+
+## ❓ FAQ
+
+**O áudio sai da minha máquina?**
+Não. Gravação e transcrição são 100% locais (ffmpeg + faster-whisper). Nada é enviado para servidores.
+
+**Fica algum arquivo de áudio salvo?**
+Não. O WAV temporário (`/tmp/voice-dictate.wav`) é apagado após a transcrição — em sucesso e em erro. Só o log de texto fica (teto de 200KB).
+
+**Funciona no Wayland?**
+A transcrição e a injeção funcionam (via XWayland). O registro da tecla usa custom-keybindings do GNOME X11; em Wayland use `NO_KEYBINDING=1 ./install.sh` e configure a tecla no seu ambiente.
+
+**Qual o melhor modelo?**
+`small` (padrão) é um bom equilíbrio. Em CPU fraco use `tiny`/`base`. Em GPU use `medium`/`large-v3` para mais precisão.
+
+**Preciso de GPU?**
+Não. Sem CUDA o install.sh deixa `WHISPER_DEVICE=auto` e o script cai para CPU automaticamente (mais lento). Com GPU NVIDIA, o install.sh detecta a `libcublas` e usa `float16`.
+
+**Posso usar outra tecla que não seja a do notebook?**
+Sim. Edite `KEY` no config e rode `./install.sh` de novo — ele relê e re-registra o binding. Formato GNOME: `<Super><Shift>XF86TouchpadOff`, `<Ctrl><Alt>d`, `XF86AudioMicMute`, etc.
+
+**Por que 2 beeps / 3 beeps?**
+2 agudos = gravando · 1 médio = transcrevendo · 1 agudo longo = texto injetado · 3 graves = erro. Pode desligar com `BEEP=0` no config.
 
 ---
 
@@ -144,6 +174,8 @@ NO_KEYBINDING=1 ./install.sh
 ```bash
 ./uninstall.sh
 ```
+
+Remove binários, venv, binding GNOME, config e o estado temporário.
 
 ## 📄 Licença
 
